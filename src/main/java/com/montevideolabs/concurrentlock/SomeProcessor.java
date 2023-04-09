@@ -3,12 +3,12 @@ package com.montevideolabs.concurrentlock;
 import org.springframework.stereotype.Component;
 
 import java.util.Random;
+import java.util.concurrent.locks.ReadWriteLock;
 
 @Component
 public class SomeProcessor {
 
     private final LockProvider locks;
-    public static int NUMBER = 0;
 
     public SomeProcessor(LockProvider lockProvider) {
         this.locks = lockProvider;
@@ -16,7 +16,7 @@ public class SomeProcessor {
 
     void process(UserEvent event) {
         String userId = event.getUserId();
-        var userLock = (String)locks.get(userId);
+        var userLock = (ReadWriteLock) locks.get(userId);
         synchronized (userLock) {
             this.method(event);
         }
@@ -24,7 +24,6 @@ public class SomeProcessor {
 
     void method(UserEvent event) {
         event.setMoney(event.getMoney() + 1);
-        NUMBER++;
     }
 }
 
