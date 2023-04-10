@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import java.util.Random;
 import java.util.concurrent.*;
 import java.util.stream.IntStream;
 
@@ -66,6 +67,8 @@ class ConcurrentlockApplicationTests {
 
     @Test
     public void testConcurrency() throws InterruptedException, ExecutionException {
+
+
         int numThreads = 10;
         int numIterationsPerThread = 1000;
 
