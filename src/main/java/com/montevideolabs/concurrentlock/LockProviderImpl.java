@@ -21,39 +21,56 @@ public class LockProviderImpl implements LockProvider {
 
     // in order to control concurrency in a thread-safe structure, I use conccurentHashMap.
     private final ConcurrentHashMap<String, Lock> locks = new ConcurrentHashMap<>();
-
     // in order to control the oldest element to remove from the concurrent map, I put the locked string
     // in a queue.
     private final ConcurrentLinkedQueue<LockToRemove> locksToRemove = new ConcurrentLinkedQueue<>();
-
-    private final static int MAX_UNUSED_LOCKS = 10000;
-    private final static long CLEANUP_INTERVAL = 1; // seconds
-    private final static int TIMEOUT = 1; //seconds
-    private final static int CLEANUP_THRESHOLD = MAX_UNUSED_LOCKS / 2;
-
-
-
+    private static final int MAX_UNUSED_LOCKS = 10000;
+    private static final long CLEANUP_INTERVAL = 1; // seconds
+    private static final int TIMEOUT = 1; //seconds
+    private static final int CLEANUP_THRESHOLD = MAX_UNUSED_LOCKS / 2;
 
     private LockProviderImpl() {
-        log.info("Create scheduled thread pool for doing clean up of unused locks by an interval of {}.", CLEANUP_INTERVAL);
-        ScheduledExecutorService executorService = newScheduledThreadPool(1);
-        executorService.scheduleAtFixedRate(this::cleanupUnusedLocksIfNeeded, CLEANUP_INTERVAL, CLEANUP_INTERVAL,
-                TimeUnit.SECONDS);
+        try {
+            startCleanupLocks();
+        } catch (Exception e) {
+            log.error("An error occurred while starting cleanup locks: {}", e.getMessage(), e);
+            throw new LockProviderException("Unable to start cleanup locks", e);
+        }
+    }
+
+    private void startCleanupLocks() {
+        try {
+            log.info("Create scheduled thread pool for doing clean up of unused locks by an interval of {}.", CLEANUP_INTERVAL);
+            ScheduledExecutorService executorService = newScheduledThreadPool(1);
+            executorService.scheduleAtFixedRate(this::cleanupUnusedLocksIfNeeded, CLEANUP_INTERVAL, CLEANUP_INTERVAL,
+                    TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("An error occurred while creating the scheduled thread pool: {}", e.getMessage(), e);
+            throw new LockProviderException("Unable to create scheduled thread pool", e);
+        }
     }
 
     @Override
     public ReadWriteLock get(final String lockId) {
-        Lock lockRef = locks.computeIfAbsent(lockId, id -> new Lock(new ReentrantReadWriteLock()));
+        try {
+            final Lock lockRef = locks.computeIfAbsent(lockId, id -> new Lock(new ReentrantReadWriteLock()));
+            incrementCount(lockId, lockRef);
+            addLockToRemove(lockId);
+            return lockRef.getLock();
+        } catch (Exception e) {
+            log.error("An error occurred while getting the lock: {}", e.getMessage(), e);
+            throw new LockProviderException("Unable to get the lock", e);
+        }
+    }
+
+    private static void incrementCount(final String lockId, final Lock lockRef) {
         lockRef.incrementCount();
-
         log.info("Incrementing lock : {} to value : {}.", lockId, lockRef.getCount());
-        var now = Instant.now();
+    }
 
-        log.info("Creating new element in queue to remove locks : {} at : {}.", lockId, now);
-        locksToRemove.add(new LockToRemove(lockId, now));
-
+    private void addLockToRemove(final String lockId) {
+        locksToRemove.add(new LockToRemove(lockId));
         log.info("Locks to be removed {}", locksToRemove.size());
-        return lockRef.getLock();
     }
 
     /**
@@ -67,10 +84,14 @@ public class LockProviderImpl implements LockProvider {
         return locks.get(lockId);
     }
 
-
     private void cleanupUnusedLocksIfNeeded() {
-        if (locksToRemove.size() > CLEANUP_THRESHOLD) {
-            cleanupUnusedLocks();
+        try {
+            if (locksToRemove.size() > CLEANUP_THRESHOLD) {
+                cleanupUnusedLocks();
+            }
+        } catch (Exception e) {
+            log.error("An error occurred while cleaning up unused locks: {}", e.getMessage(), e);
+            throw new LockProviderException("Unable to cleanup unused locks", e);
         }
     }
 
@@ -81,44 +102,69 @@ public class LockProviderImpl implements LockProvider {
      */
     private void cleanupUnusedLocks() {
         LockToRemove lockToRemove;
-        var needToRemove = true;
-        while (((lockToRemove = locksToRemove.peek()) != null) && (needToRemove) ) {
-            log.info("Checking if lock : {} need to be removed.", lockToRemove.getLockId());
-            Lock lockRef = locks.get(lockToRemove.getLockId());
-            Instant now = Instant.now();
-            needToRemove = now.minus(TIMEOUT, ChronoUnit.SECONDS).isAfter(lockToRemove.getLockInstant());
-
-            if (needToRemove) {
-                log.info("Lock : {} is old, will be removed from queue.", lockToRemove.getLockId());
-                locksToRemove.poll();
+        try {
+            while ((lockToRemove = locksToRemove.peek()) != null) {
+                log.info("Checking if lock : {} need to be removed.", lockToRemove.getLockId());
+                if (lockToRemove.canRemoveLock()) {
+                    removeLockFromQueue(lockToRemove);
+                    removeLockFromMap(lockToRemove);
+                } else {
+                    break;
+                }
             }
-
-            if (needToRemove && lockRef.decrementCount()) {
-                log.info("Removing lock : {} from map.", lockToRemove);
-                locks.remove(lockToRemove.getLockId());
-            }
-
-            log.info("Lock : {} has count of : {}.", lockToRemove, lockRef.getCount());
+        } catch (Exception e) {
+            log.error("An error occurred while cleaning up unused locks: {}", e.getMessage(), e);
+            throw new LockProviderException("Unable to cleanup unused locks", e);
         }
     }
 
+    private void removeLockFromQueue(final LockToRemove lockToRemove) {
+        log.info("Lock : {} is old, will be removed from queue.", lockToRemove.getLockId());
+        locksToRemove.poll();
+    }
+
+    private void removeLockFromMap(final LockToRemove lockToRemove) {
+        final Lock lock = locks.get(lockToRemove.getLockId());
+        if (lock == null) {
+            log.warn("Lock : {} not found in map.", lockToRemove.getLockId());
+            return;
+        }
+        try {
+            if (lock.decrementCount()) {
+                log.info("Removing lock : {} from map.", lockToRemove);
+                locks.remove(lockToRemove.getLockId());
+            }
+            log.info("Lock : {} has count of : {}.", lockToRemove, lock.getCount());
+        } catch (Exception e) {
+            log.error("Error while removing lock from map: {}", e.getMessage());
+        }
+    }
+
+
     private record LockToRemove(String lockId, Instant lockInstant) {
+        public LockToRemove(final String lockId) {
+            this(lockId, Instant.now());
+        }
 
         private String getLockId() {
             return lockId;
         }
 
         private Instant getLockInstant() {
-            return this.lockInstant;
+            return lockInstant;
         }
 
+        private boolean canRemoveLock() {
+            final Instant now = Instant.now();
+            return now.minus(TIMEOUT, ChronoUnit.SECONDS).isAfter(this.getLockInstant());
+        }
     }
 
     private static class Lock {
         private final ReadWriteLock lock;
         private final LongAdder count;
 
-        Lock(ReadWriteLock lock) {
+        Lock(final ReadWriteLock lock) {
             this.lock = lock;
             this.count = new LongAdder();
         }
@@ -141,4 +187,3 @@ public class LockProviderImpl implements LockProvider {
         }
     }
 }
-

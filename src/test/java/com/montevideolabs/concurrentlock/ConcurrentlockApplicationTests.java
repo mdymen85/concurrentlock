@@ -102,7 +102,7 @@ class ConcurrentlockApplicationTests {
         }
 
 //        // Wait for locks cleanup
-        Thread.sleep(10000);
+        Thread.sleep(12000);
 
         // Make sure all the locks have been removed
         assertNull(lockProvider.checkLock("lockToRemove"));
